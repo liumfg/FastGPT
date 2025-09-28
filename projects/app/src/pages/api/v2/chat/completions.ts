@@ -61,6 +61,10 @@ import { getPluginInputsFromStoreNodes } from '@fastgpt/global/core/app/plugin/u
 import { UserError } from '@fastgpt/global/common/error/utils';
 import { getLocale } from '@fastgpt/service/common/middle/i18n';
 import { formatTime2YMDHM } from '@fastgpt/global/common/string/time';
+import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
+import { filterDatasetsByTmbId } from '@fastgpt/service/core/dataset/utils';
+import { FlowNodeTypeEnum } from '@fastgpt/global/core/workflow/node/constant';
+import { NodeInputKeyEnum } from '@fastgpt/global/core/workflow/constants';
 
 type FastGptWebChatProps = {
   chatId?: string; // undefined: get histories from messages, '': new chat, 'xxxxx': get histories from db
@@ -248,6 +252,94 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       variables = {};
     }
     runtimeNodes = rewriteNodeOutputByHistories(runtimeNodes, interactive);
+
+    /* Natural language dataset selection */
+    try {
+      addLog.info('[kb-nl] start parse');
+      const lastUserText = chatValue2RuntimePrompt(userQuestion.value).text || '';
+      addLog.info('[kb-nl] lastUserText', { text: lastUserText?.slice(0, 200) });
+      const datasetNames = (() => {
+        const text = lastUserText;
+        const names = new Set<string>();
+        const pushNames = (s: string) => {
+          s
+            .split(/[,，;；/\\\s]+/)
+            .map((v) => v.trim())
+            .filter((v) => v.length > 0)
+            .forEach((v) => names.add(v));
+        };
+        const patterns: RegExp[] = [
+          /使用(?:的)?(?:知识库|数据集|库)[:：]?\s*([^。.!！?？\n]+)/i,
+          /用(?:到)?(?:知识库|数据集|库)[:：]?\s*([^。.!！?？\n]+)/i,
+          /从\s*([^。.!！?？\n]+?)\s*(?:知识库|数据集|库)\s*(?:检索|搜索|查询)/i,
+          /\b(?:kb|dataset)\s*[:：=]\s*([^。.!！?？\n]+)/i
+        ];
+        for (const reg of patterns) {
+          const m = text.match(reg);
+          if (m && m[1]) pushNames(m[1]);
+        }
+        return Array.from(names);
+      })();
+      addLog.info('[kb-nl] parsed names', { datasetNames });
+
+      if (datasetNames.length > 0) {
+        // Find candidate datasets in this team by fuzzy name match
+        const all = await MongoDataset.find({ teamId: app.teamId }, '_id name').lean();
+        addLog.info('[kb-nl] all datasets', {
+          count: all.length,
+          names: all.slice(0, 20).map((d: any) => d.name)
+        });
+        const candIds = all
+          .filter((ds) =>
+            datasetNames.some((n) => String(ds.name).toLowerCase().includes(n.toLowerCase()))
+          )
+          .map((ds) => String(ds._id));
+        addLog.info('[kb-nl] candidate ids', { candCount: candIds.length });
+
+        let authedIds: string[] = [];
+        try {
+          if (tmbId) {
+            authedIds = await filterDatasetsByTmbId({ datasetIds: candIds, tmbId: String(tmbId) });
+          } else {
+            addLog.info('[kb-nl] no tmbId, skip auth filter');
+            authedIds = candIds;
+          }
+        } catch (err) {
+          addLog.warn?.('[kb-nl] auth filter error, fallback to candIds', { error: String(err) });
+          authedIds = candIds;
+        }
+        const selected = authedIds.map((id) => ({ datasetId: id }));
+        addLog.info('[kb-nl] authed ids', { authedCount: authedIds.length });
+
+        if (selected.length > 0) {
+          let updatedNodeCount = 0;
+          runtimeNodes = runtimeNodes.map((node) => {
+            if (node.flowNodeType !== FlowNodeTypeEnum.datasetSearchNode) return node;
+            let applied = false;
+            const inputs = node.inputs?.map((input) => {
+              if (input.key === (NodeInputKeyEnum.datasetSelectList as any)) {
+                applied = true;
+                return { ...input, value: selected };
+              }
+              return input;
+            });
+            if (applied) updatedNodeCount++;
+            return { ...node, inputs };
+          });
+          addLog.info('[kb-nl] applied datasets to nodes', {
+            updatedNodeCount,
+            selectedCount: selected.length
+          });
+        } else {
+          addLog.info('[kb-nl] no authed dataset matched');
+        }
+      } else {
+        addLog.info('[kb-nl] no dataset names parsed from text');
+      }
+    } catch (e) {
+      // ignore dataset selection errors to avoid blocking chat
+      addLog.warn?.('[kb-nl] dataset selection error', { error: String(e) });
+    }
 
     const workflowResponseWrite = getWorkflowResponseWrite({
       res,
