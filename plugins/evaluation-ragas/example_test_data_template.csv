@@ -1,0 +1,7 @@
+question,ground_truth
+什么是 FastGPT？,FastGPT 是一个基于大语言模型的知识库问答平台
+FastGPT 支持哪些功能？,支持知识库管理、智能问答、工作流编排等功能
+如何部署 FastGPT？,可以通过 Docker 或 Kubernetes 进行部署
+FastGPT 使用什么向量数据库？,支持 Milvus、PgVector、Zilliz 等多种向量数据库
+FastGPT 的核心优势是什么？,开箱即用、支持多种数据源、可视化工作流编排
+
