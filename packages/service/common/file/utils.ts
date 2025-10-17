@@ -1,88 +1,93 @@
-import { isProduction } from '@fastgpt/global/common/system/constants';
-import fs from 'fs';
-import path from 'path';
+/**
+ * 文件处理工具
+ */
 
-export const getFileMaxSize = () => {
-  const mb = global.feConfigs?.uploadFileMaxSize || 1000;
-  return mb * 1024 * 1024;
-};
+/**
+ * 解析 CSV 文件（正确处理引号内的换行符）
+ */
+export function parseCSV(content: string): string[][] {
+  const result: string[][] = [];
+  const rows: string[] = [];
+  let currentRow = '';
+  let inQuotes = false;
 
-export const removeFilesByPaths = (paths: string[]) => {
-  paths.forEach((path) => {
-    fs.unlink(path, (err) => {
-      if (err) {
-        // console.error(err);
+  // 首先，正确地按行分割（考虑引号内的换行）
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+    const nextChar = content[i + 1];
+
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      currentRow += char;
+    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+      // 换行符在引号外，这是真正的行分隔符
+      if (currentRow.trim()) {
+        rows.push(currentRow);
       }
-    });
-  });
-};
-
-export const guessBase64ImageType = (str: string) => {
-  const imageTypeMap: Record<string, string> = {
-    '/': 'image/jpeg',
-    i: 'image/png',
-    R: 'image/gif',
-    U: 'image/webp',
-    Q: 'image/bmp',
-    P: 'image/svg+xml',
-    T: 'image/tiff',
-    J: 'image/jp2',
-    S: 'image/x-tga',
-    I: 'image/ief',
-    V: 'image/vnd.microsoft.icon',
-    W: 'image/vnd.wap.wbmp',
-    X: 'image/x-xbitmap',
-    Z: 'image/x-xpixmap',
-    Y: 'image/x-xwindowdump'
-  };
-
-  const defaultType = 'image/jpeg';
-  if (typeof str !== 'string' || str.length === 0) {
-    return defaultType;
-  }
-
-  const firstChar = str.charAt(0);
-  return imageTypeMap[firstChar] || defaultType;
-};
-
-export const getFileContentTypeFromHeader = (header: string): string | undefined => {
-  const contentType = header.split(';')[0];
-  return contentType;
-};
-
-export const clearDirFiles = (dirPath: string) => {
-  if (!fs.existsSync(dirPath)) {
-    return;
-  }
-
-  fs.rmdirSync(dirPath, {
-    recursive: true
-  });
-};
-
-export const clearTmpUploadFiles = () => {
-  if (!isProduction) return;
-  const tmpPath = '/tmp';
-
-  fs.readdir(tmpPath, (err, files) => {
-    if (err) return;
-
-    for (const file of files) {
-      if (file === 'v8-compile-cache-0') continue;
-
-      const filePath = path.join(tmpPath, file);
-
-      fs.stat(filePath, (err, stats) => {
-        if (err) return;
-
-        // 如果文件是在2小时前上传的，则认为是临时文件并删除它
-        if (Date.now() - stats.mtime.getTime() > 2 * 60 * 60 * 1000) {
-          fs.unlink(filePath, (err) => {
-            if (err) return;
-            console.log(`Deleted temp file: ${filePath}`);
-          });
-        }
-      });
+      currentRow = '';
+      // 跳过 \r\n 中的 \n
+      if (char === '\r' && nextChar === '\n') {
+        i++;
+      }
+    } else {
+      currentRow += char;
     }
-  });
-};
+  }
+
+  // 添加最后一行
+  if (currentRow.trim()) {
+    rows.push(currentRow);
+  }
+
+  // 然后解析每一行的字段
+  for (const line of rows) {
+    const fields: string[] = [];
+    let currentField = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+
+      if (char === '"') {
+        // 检查是否是转义的引号 ""
+        if (inQuotes && line[i + 1] === '"') {
+          currentField += '"';
+          i++; // 跳过下一个引号
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        fields.push(currentField.trim());
+        currentField = '';
+      } else {
+        currentField += char;
+      }
+    }
+
+    // 添加最后一个字段
+    fields.push(currentField.trim());
+
+    result.push(fields);
+  }
+
+  return result;
+}
+
+/**
+ * 生成 CSV 内容
+ */
+export function generateCSV(rows: string[][]): string {
+  return rows
+    .map((row) =>
+      row
+        .map((field) => {
+          // 如果字段包含逗号或引号，需要用引号包裹
+          if (field.includes(',') || field.includes('"') || field.includes('\n')) {
+            return `"${field.replace(/"/g, '""')}"`;
+          }
+          return field;
+        })
+        .join(',')
+    )
+    .join('\n');
+}
